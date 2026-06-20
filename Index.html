@@ -285,7 +285,8 @@
 
         <div id="excelArea" class="excel-area">
           <div class="empty">
-            Converted Excel data will appear here.
+            Converted data preview will appear here.
+            Downloaded Excel will be in Form 3A format.
           </div>
         </div>
 
@@ -315,7 +316,8 @@
 
       excelArea.innerHTML = `
         <div class="empty">
-          Click Convert to extract data into Excel format.
+          Click Convert to extract data.
+          Downloaded Excel will be in Form 3A format.
         </div>
       `;
 
@@ -358,7 +360,7 @@
       convertBtn.textContent = "Converting...";
       downloadBtn.style.display = "none";
 
-      setStatus("Converting PDF to Excel...", "");
+      setStatus("Converting PDF to Form 3A Excel...", "");
 
       try {
         const response = await fetch("/convert", {
@@ -377,7 +379,7 @@
         downloadBtn.href = result.download_url;
         downloadBtn.style.display = "inline-block";
 
-        setStatus("Converted successfully.", "success");
+        setStatus("Converted successfully. Click Download Excel.", "success");
 
       } catch (error) {
         excelArea.innerHTML = `
