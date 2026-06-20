@@ -22,7 +22,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 # ======================================================
-# CLEANING FUNCTIONS
+# CLEANING
 # ======================================================
 
 def clean_text(value):
@@ -39,7 +39,7 @@ def clean_text(value):
 def amount_to_number(value):
     value = clean_text(value)
 
-    if value in ["", "-", "."]:
+    if value in ["", "-", ".", "0"]:
         return 0.0
 
     value = value.replace(",", "")
@@ -118,7 +118,10 @@ def extract_pdf_tables(pdf_path):
 
 
 # ======================================================
-# PARSE BASIC DETAILS FROM PDF
+# PARSE BASIC DETAILS
+# Works for:
+# 1. Form 3A PDF
+# 2. EPFO passbook PDF
 # ======================================================
 
 def parse_basic_details(text):
@@ -131,41 +134,73 @@ def parse_basic_details(text):
         "father_name": "",
         "factory_address": "",
         "establishment_id": "",
+        "company_name": "",
         "statutory_rate": "12%",
         "higher_rate_employee": "NO",
         "higher_rate_employer": "NO",
         "higher_rate_pension": "NO",
-        "company_name": "",
         "date": "",
     }
 
-    details["account_no"] = find_value(normalized, [
-        r"Account\s*No\.?\s*([A-Z0-9]+)",
-        r"1\s*Account\s*No\.?\s*([A-Z0-9]+)",
+    # Member ID / Name from EPFO passbook
+    member_id = find_value(normalized, [
+        r"Member\s*ID\s*/\s*Name\s*([A-Z0-9]+)\s*/",
+        r"Member\s*ID\s*[:\-]?\s*([A-Z0-9]+)",
     ])
+
+    member_name = find_value(normalized, [
+        r"Member\s*ID\s*/\s*Name\s*[A-Z0-9]+\s*/\s*([A-Z][A-Z\s\.]+?)(?:\s*Date\s*of\s*Birth|\s*UAN|\s*EPF\s*Passbook|$)",
+    ])
+
+    # Establishment ID / Name from EPFO passbook
+    establishment_id = find_value(normalized, [
+        r"Establishment\s*ID\s*/\s*Name\s*([A-Z0-9]+)\s*/",
+        r"Establishment\s*ID\s*([A-Z0-9]+)",
+    ])
+
+    establishment_name = find_value(normalized, [
+        r"Establishment\s*ID\s*/\s*Name\s*[A-Z0-9]+\s*/\s*([A-Z0-9\s\.\-&PRIVATE LIMITED]+?)(?:\s*Member\s*ID|\s*Member|$)",
+    ])
+
+    # Form 3A account number
+    account_no = find_value(normalized, [
+        r"1\s*Account\s*No\.?\s*([A-Z0-9]+)",
+        r"Account\s*No\.?\s*([A-Z0-9]+)",
+    ])
+
+    details["account_no"] = account_no or member_id
+    details["establishment_id"] = establishment_id
 
     details["uan"] = find_value(normalized, [
         r"\bUAN\b\s*([0-9]{8,20})",
     ])
 
-    details["name"] = find_value(normalized, [
+    # Form 3A name
+    form_name = find_value(normalized, [
+        r"2\s*Name\s*/\s*Surname\s*([A-Z][A-Z\s\.]+?)(?:\s*\(in\s*Block|\s*3\s*Father|\s*Father)",
         r"Name\s*/\s*Surname\s*([A-Z][A-Z\s\.]+?)(?:\s*\(in\s*Block|\s*3\s*Father|\s*Father)",
-        r"2\s*Name\s*/\s*Surname\s*([A-Z][A-Z\s\.]+)",
     ])
+
+    details["name"] = form_name or member_name
 
     details["father_name"] = find_value(normalized, [
+        r"3\s*Father'?s\s*/\s*Husband'?s\s*Name\s*([A-Z][A-Z\s\.]+?)(?:\s*4\s*Name|\s*Name\s*&\s*Address)",
         r"Father'?s\s*/\s*Husband'?s\s*Name\s*([A-Z][A-Z\s\.]+?)(?:\s*4\s*Name|\s*Name\s*&\s*Address)",
-        r"Father'?s\s*/\s*Husband'?s\s*([A-Z][A-Z\s\.]+?)(?:\s*4\s*Name|\s*Name\s*&\s*Address)",
     ])
 
-    details["factory_address"] = find_value(normalized, [
+    factory_address = find_value(normalized, [
+        r"4\s*Name\s*&\s*Address\s*of\s*the\s*Factory\s*(.*?)(?:Establishment\s*ID)",
         r"Name\s*&\s*Address\s*of\s*the\s*Factory\s*(.*?)(?:Establishment\s*ID)",
-        r"4\s*Name\s*&\s*Address\s*(.*?)(?:Establishment\s*ID)",
     ])
 
-    details["establishment_id"] = find_value(normalized, [
-        r"Establishment\s*ID\s*([A-Z0-9]+)",
-    ])
+    details["factory_address"] = factory_address or establishment_name
+    details["company_name"] = establishment_name
+
+    if not details["company_name"] and factory_address:
+        details["company_name"] = factory_address.split(",")[0].strip()
+
+    if not details["company_name"]:
+        details["company_name"] = "TRICORE SOLUTIONS PRIVATE LIMITED"
 
     statutory_rate = find_value(normalized, [
         r"Statutory\s*rate\s*of\s*Contribution\s*([0-9]+%?)",
@@ -173,38 +208,44 @@ def parse_basic_details(text):
 
     if statutory_rate:
         if "%" not in statutory_rate:
-            statutory_rate = statutory_rate + "%"
+            statutory_rate += "%"
         details["statutory_rate"] = statutory_rate
 
-    date_value = find_value(normalized, [
+    details["date"] = find_value(normalized, [
         r"Dated\s*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})",
+        r"Printed\s*On\s*[:\-]?\s*([0-9]{1,2}[/-][0-9]{1,2}[/-][0-9]{2,4})",
     ])
-
-    details["date"] = date_value
-
-    if details["factory_address"]:
-        first_part = details["factory_address"].split(",")[0].strip()
-        details["company_name"] = first_part
-
-    if not details["company_name"]:
-        company = find_value(normalized, [
-            r"For\s+([A-Z0-9\s\.,&\-]+?LIMITED)",
-        ])
-        details["company_name"] = company
 
     return details
 
 
 # ======================================================
-# PARSE MONTHLY CONTRIBUTION ROWS
+# PARSE MONTHLY TABLE
+# Works for Form 3A and EPFO passbook
 # ======================================================
 
 MONTH_PATTERN = r"^(Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|September|Oct|October|Nov|November|Dec|December)"
 
 
-def is_month_row_text(value):
+def is_month_text(value):
     value = clean_text(value)
     return bool(re.match(MONTH_PATTERN, value, re.IGNORECASE))
+
+
+def numeric_cells(cells):
+    nums = []
+
+    for cell in cells:
+        text = clean_text(cell)
+
+        if text == "":
+            continue
+
+        # Pick values like 15000, 15,000, 1800, 1,800, 0, 0.00
+        if re.fullmatch(r"-?\d+(?:,\d{3})*(?:\.\d+)?", text):
+            nums.append(amount_to_number(text))
+
+    return nums
 
 
 def parse_monthly_rows_from_tables(table_rows):
@@ -214,28 +255,69 @@ def parse_monthly_rows_from_tables(table_rows):
         if not row:
             continue
 
-        first_cell = clean_text(row[0])
-
-        if not is_month_row_text(first_cell):
-            continue
-
         cells = [clean_text(cell) for cell in row]
 
-        while len(cells) < 8:
-            cells.append("")
+        if not cells:
+            continue
 
-        month = cells[0]
+        first_cell = cells[0]
 
-        monthly_rows.append({
-            "month": month,
-            "wages": amount_to_number(cells[1]),
-            "epf": amount_to_number(cells[2]),
-            "epf_833": amount_to_number(cells[3]),
-            "pension": amount_to_number(cells[4]),
-            "refund": amount_to_number(cells[5]),
-            "non_contribution_days": amount_to_number(cells[6]),
-            "remarks": cells[7],
-        })
+        if not is_month_text(first_cell):
+            continue
+
+        row_text = " ".join(cells).upper()
+
+        # EPFO passbook has CR / DR.
+        # We use only CR contribution rows.
+        if " DR " in f" {row_text} ":
+            continue
+
+        is_passbook_row = " CR " in f" {row_text} " or "CONTR" in row_text or "DUE-MONTH" in row_text
+
+        if is_passbook_row:
+            nums = numeric_cells(cells)
+
+            # Expected passbook numeric sequence:
+            # wage_epf, wage_eps, employee_contribution, employer_contribution, pension
+            if len(nums) >= 5:
+                monthly_rows.append({
+                    "month": first_cell,
+                    "wages": nums[0],
+                    "epf": nums[2],
+                    "epf_833": nums[3],
+                    "pension": nums[4],
+                    "refund": 0.0,
+                    "non_contribution_days": 0.0,
+                    "remarks": "",
+                })
+            elif len(nums) >= 3:
+                monthly_rows.append({
+                    "month": first_cell,
+                    "wages": nums[0],
+                    "epf": nums[1],
+                    "epf_833": nums[2],
+                    "pension": 0.0,
+                    "refund": 0.0,
+                    "non_contribution_days": 0.0,
+                    "remarks": "",
+                })
+
+        else:
+            # Form 3A table row:
+            # Month, Wages, EPF, EPF 8 1/3, Pension, Refund, Days, Remarks
+            while len(cells) < 8:
+                cells.append("")
+
+            monthly_rows.append({
+                "month": cells[0],
+                "wages": amount_to_number(cells[1]),
+                "epf": amount_to_number(cells[2]),
+                "epf_833": amount_to_number(cells[3]),
+                "pension": amount_to_number(cells[4]),
+                "refund": amount_to_number(cells[5]),
+                "non_contribution_days": amount_to_number(cells[6]),
+                "remarks": cells[7],
+            })
 
     return monthly_rows
 
@@ -246,38 +328,44 @@ def parse_monthly_rows_from_text(text):
     for line in text.splitlines():
         line = clean_text(line)
 
-        if not is_month_row_text(line):
+        if not is_month_text(line):
             continue
 
-        decimal_numbers = re.findall(r"\d+\.\d{2}", line)
+        upper_line = line.upper()
 
-        if len(decimal_numbers) < 4:
+        if " DR " in f" {upper_line} ":
             continue
 
-        first_amount_pos = line.find(decimal_numbers[0])
-        month_text = line[:first_amount_pos].strip()
+        # This fallback works for many selectable PDFs.
+        amounts = re.findall(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d{2}", line)
 
-        wages = amount_to_number(decimal_numbers[0])
-        epf = amount_to_number(decimal_numbers[1])
-        epf_833 = amount_to_number(decimal_numbers[2])
-        pension = amount_to_number(decimal_numbers[3])
+        if len(amounts) >= 4:
+            first_amount_pos = line.find(amounts[0])
+            month_part = line[:first_amount_pos].strip()
 
-        refund = 0.0
-        days = 0.0
+            values = [amount_to_number(x) for x in amounts]
 
-        if len(decimal_numbers) >= 5:
-            days = amount_to_number(decimal_numbers[-1])
+            if " CR " in f" {upper_line} " or "CONTR" in upper_line:
+                wages = values[0]
+                epf = values[1] if len(values) > 1 else 0
+                employer = values[2] if len(values) > 2 else 0
+                pension = values[3] if len(values) > 3 else 0
+            else:
+                wages = values[0]
+                epf = values[1] if len(values) > 1 else 0
+                employer = values[2] if len(values) > 2 else 0
+                pension = values[3] if len(values) > 3 else 0
 
-        monthly_rows.append({
-            "month": month_text,
-            "wages": wages,
-            "epf": epf,
-            "epf_833": epf_833,
-            "pension": pension,
-            "refund": refund,
-            "non_contribution_days": days,
-            "remarks": "",
-        })
+            monthly_rows.append({
+                "month": month_part,
+                "wages": wages,
+                "epf": epf,
+                "epf_833": employer,
+                "pension": pension,
+                "refund": 0.0,
+                "non_contribution_days": 0.0,
+                "remarks": "",
+            })
 
     return monthly_rows
 
@@ -292,8 +380,31 @@ def parse_monthly_rows(table_rows, text):
 
 
 # ======================================================
-# EXCEL TEMPLATE FORMAT
+# SAFE EXCEL HELPERS
+# Fixes:
+# 'MergedCell' object attribute 'value' is read-only
 # ======================================================
+
+def get_real_cell(ws, cell_ref):
+    for merged_range in ws.merged_cells.ranges:
+        if cell_ref in merged_range:
+            min_col, min_row, max_col, max_row = merged_range.bounds
+            return ws.cell(row=min_row, column=min_col)
+
+    return ws[cell_ref]
+
+
+def set_cell(ws, cell_ref, value, bold=False, size=10, align="left"):
+    cell = get_real_cell(ws, cell_ref)
+    cell.value = value
+    cell.font = Font(bold=bold, size=size)
+    cell.alignment = Alignment(
+        horizontal=align,
+        vertical="center",
+        wrap_text=True
+    )
+    return cell
+
 
 def make_border():
     thin = Side(style="thin", color="000000")
@@ -311,18 +422,16 @@ def apply_border(ws, start_row, start_col, end_row, end_col):
     ):
         for cell in row:
             cell.border = border
+            cell.alignment = Alignment(
+                horizontal=cell.alignment.horizontal or "center",
+                vertical="center",
+                wrap_text=True
+            )
 
 
-def set_cell(ws, cell_ref, value, bold=False, size=10, align="left"):
-    cell = ws[cell_ref]
-    cell.value = value
-    cell.font = Font(bold=bold, size=size)
-    cell.alignment = Alignment(
-        horizontal=align,
-        vertical="center",
-        wrap_text=True
-    )
-
+# ======================================================
+# CREATE FORM 3A EXCEL OUTPUT
+# ======================================================
 
 def create_form3a_excel(details, monthly_rows, excel_path):
     wb = Workbook()
@@ -356,14 +465,17 @@ def create_form3a_excel(details, monthly_rows, excel_path):
     for col, width in column_widths.items():
         ws.column_dimensions[col].width = width
 
-    for row_no in range(1, 60):
+    for row_no in range(1, 70):
         ws.row_dimensions[row_no].height = 22
 
-    ws.row_dimensions[1].height = 24
-    ws.row_dimensions[4].height = 26
+    ws.row_dimensions[1].height = 25
+    ws.row_dimensions[4].height = 28
     ws.row_dimensions[12].height = 34
     ws.row_dimensions[13].height = 34
     ws.row_dimensions[14].height = 34
+    ws.row_dimensions[17].height = 30
+    ws.row_dimensions[18].height = 48
+    ws.row_dimensions[19].height = 22
 
     # ==================================================
     # HEADER
@@ -453,28 +565,27 @@ def create_form3a_excel(details, monthly_rows, excel_path):
     set_cell(ws, "H12", details.get("higher_rate_pension", "NO"), bold=True, align="center")
 
     # ==================================================
-    # CONTRIBUTION TABLE HEADER
+    # TABLE HEADER
     # ==================================================
 
-    table_start = 17
     header_fill = PatternFill("solid", fgColor="D9EAF7")
 
-    ws.merge_cells(start_row=17, start_column=1, end_row=19, end_column=1)
+    ws.merge_cells("A17:A19")
     set_cell(ws, "A17", "Months", bold=True, align="center")
 
-    ws.merge_cells(start_row=17, start_column=2, end_row=17, end_column=3)
+    ws.merge_cells("B17:C17")
     set_cell(ws, "B17", "Employee's Share", bold=True, align="center")
 
-    ws.merge_cells(start_row=17, start_column=4, end_row=17, end_column=5)
+    ws.merge_cells("D17:E17")
     set_cell(ws, "D17", "Employer's Share", bold=True, align="center")
 
-    ws.merge_cells(start_row=17, start_column=6, end_row=18, end_column=6)
+    ws.merge_cells("F17:F18")
     set_cell(ws, "F17", "Refund of\nAdvance", bold=True, align="center")
 
-    ws.merge_cells(start_row=17, start_column=7, end_row=18, end_column=7)
+    ws.merge_cells("G17:G18")
     set_cell(ws, "G17", "No. of days /\nperiod of non-\ncontributing\nservice if any", bold=True, align="center")
 
-    ws.merge_cells(start_row=17, start_column=8, end_row=18, end_column=8)
+    ws.merge_cells("H17:H18")
     set_cell(ws, "H17", "Remarks", bold=True, align="center")
 
     set_cell(ws, "B18", "Amount of\nWages", bold=True, align="center")
@@ -542,10 +653,11 @@ def create_form3a_excel(details, monthly_rows, excel_path):
 
     for col in range(2, 8):
         col_letter = get_column_letter(col)
-        ws[f"{col_letter}{total_row}"] = f"=SUM({col_letter}{data_start}:{col_letter}{total_row - 1})"
-        ws[f"{col_letter}{total_row}"].font = Font(bold=True)
-        ws[f"{col_letter}{total_row}"].number_format = "0.00"
-        ws[f"{col_letter}{total_row}"].alignment = Alignment(horizontal="right", vertical="center")
+        cell = ws[f"{col_letter}{total_row}"]
+        cell.value = f"=SUM({col_letter}{data_start}:{col_letter}{total_row - 1})"
+        cell.font = Font(bold=True)
+        cell.number_format = "0.00"
+        cell.alignment = Alignment(horizontal="right", vertical="center")
 
     # ==================================================
     # CERTIFICATION AREA
@@ -563,10 +675,14 @@ def create_form3a_excel(details, monthly_rows, excel_path):
     )
 
     ws.merge_cells(start_row=cert_row, start_column=6, end_row=cert_row, end_column=8)
-    ws[f"F{cert_row}"] = f"=C{total_row}+D{total_row}+E{total_row}"
-    ws[f"F{cert_row}"].font = Font(bold=True)
-    ws[f"F{cert_row}"].number_format = '"RS." 0.00'
-    ws[f"F{cert_row}"].alignment = Alignment(horizontal="center", vertical="center")
+    formula_cell = set_cell(
+        ws,
+        f"F{cert_row}",
+        f"=C{total_row}+D{total_row}+E{total_row}",
+        bold=True,
+        align="center"
+    )
+    formula_cell.number_format = '"RS." 0.00'
 
     cert_row_2 = cert_row + 5
 
@@ -594,9 +710,7 @@ def create_form3a_excel(details, monthly_rows, excel_path):
     )
 
     set_cell(ws, f"A{sign_row + 3}", "Dated")
-
-    date_value = details.get("date") or ""
-    set_cell(ws, f"B{sign_row + 3}", date_value, bold=True)
+    set_cell(ws, f"B{sign_row + 3}", details.get("date", ""), bold=True)
 
     ws.merge_cells(start_row=sign_row + 3, start_column=6, end_row=sign_row + 3, end_column=8)
     set_cell(ws, f"F{sign_row + 3}", "Authorised Signatory", bold=True, align="center")
@@ -617,17 +731,9 @@ def create_form3a_excel(details, monthly_rows, excel_path):
 
     final_row = note_row + 3
 
-    # Borders for full form
     apply_border(ws, 1, 1, final_row, 8)
 
-    # Outer border is visually same thin border here
     ws.print_area = f"A1:H{final_row}"
-
-    # Better alignment
-    for row in ws.iter_rows(min_row=1, max_row=final_row, min_col=1, max_col=8):
-        for cell in row:
-            if cell.alignment is None:
-                cell.alignment = Alignment(vertical="center", wrap_text=True)
 
     wb.save(excel_path)
 
@@ -670,7 +776,7 @@ def convert_pdf():
 
         if not monthly_rows:
             return jsonify({
-                "error": "Monthly contribution table was not detected. If the PDF is scanned/image-based, OCR is required."
+                "error": "Monthly contribution table was not detected. If this PDF is scanned/image-based, OCR is required."
             }), 400
 
         excel_name = f"{Path(safe_name).stem}_form3a_{unique_id}.xlsx"
