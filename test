@@ -1,0 +1,217 @@
+import io
+from pathlib import Path
+
+import pytest
+from openpyxl import load_workbook
+
+import app as form_app
+
+
+@pytest.fixture
+def flask_client(tmp_path, monkeypatch):
+    upload_dir = tmp_path / "uploads"
+    output_dir = tmp_path / "outputs"
+
+    upload_dir.mkdir()
+    output_dir.mkdir()
+
+    monkeypatch.setattr(form_app, "UPLOAD_DIR", upload_dir)
+    monkeypatch.setattr(form_app, "OUTPUT_DIR", output_dir)
+
+    form_app.app.config.update(TESTING=True)
+
+    with form_app.app.test_client() as client:
+        yield client, output_dir
+
+
+def test_clean_text():
+    result = form_app.clean_text("  Hello\nWorld\xa0 Test   ")
+    assert result == "Hello World Test"
+
+
+def test_amount_to_number():
+    assert form_app.amount_to_number("1,500.50") == 1500.50
+    assert form_app.amount_to_number("-") == 0.0
+    assert form_app.amount_to_number("") == 0.0
+    assert form_app.amount_to_number("Rs. 2,000") == 2000.0
+
+
+def test_parse_basic_details():
+    text = """
+    Member ID / Name ABC123 / HEMA M
+    UAN 123456789012
+    Establishment ID / Name EST123 / TRICORE SOLUTIONS PRIVATE LIMITED
+    Printed On: 01/07/2026
+    """
+
+    details = form_app.parse_basic_details(text)
+
+    assert details["account_no"] == "ABC123"
+    assert details["uan"] == "123456789012"
+    assert details["name"] == "HEMA M"
+    assert details["establishment_id"] == "EST123"
+
+
+def test_parse_monthly_rows_from_form3a_table():
+    table_rows = [
+        [
+            "April",
+            "15,000.00",
+            "1,800.00",
+            "550.00",
+            "1,250.00",
+            "0",
+            "0",
+            "",
+        ]
+    ]
+
+    rows = form_app.parse_monthly_rows_from_tables(table_rows)
+
+    assert len(rows) == 1
+    assert rows[0]["month"] == "April"
+    assert rows[0]["wages"] == 15000.0
+    assert rows[0]["epf"] == 1800.0
+    assert rows[0]["epf_833"] == 550.0
+    assert rows[0]["pension"] == 1250.0
+
+
+def test_create_form3a_excel(tmp_path):
+    details = {
+        "account_no": "ABC123",
+        "uan": "123456789012",
+        "name": "HEMA M",
+        "father_name": "TEST FATHER",
+        "factory_address": "TRICORE SOLUTIONS PRIVATE LIMITED",
+        "establishment_id": "EST123",
+        "statutory_rate": "12%",
+        "higher_rate_employee": "NO",
+        "higher_rate_employer": "NO",
+        "higher_rate_pension": "NO",
+        "company_name": "TRICORE SOLUTIONS PRIVATE LIMITED",
+        "date": "01/07/2026",
+    }
+
+    monthly_rows = [
+        {
+            "month": "April",
+            "wages": 15000,
+            "epf": 1800,
+            "epf_833": 550,
+            "pension": 1250,
+            "refund": 0,
+            "non_contribution_days": 0,
+            "remarks": "",
+        }
+    ]
+
+    excel_path = tmp_path / "output.xlsx"
+
+    form_app.create_form3a_excel(details, monthly_rows, excel_path)
+
+    assert excel_path.exists()
+
+    wb = load_workbook(excel_path, data_only=False)
+    ws = wb["CORRECT"]
+
+    assert ws["A1"].value.startswith("Form No. 3A")
+    assert ws["B6"].value == "ABC123"
+    assert ws["B7"].value == "123456789012"
+    assert ws["B8"].value == "HEMA M"
+    assert ws["A20"].value == "April"
+    assert ws["B20"].value == 15000
+
+
+def test_convert_route_success(flask_client, monkeypatch):
+    client, output_dir = flask_client
+
+    def fake_extract_pdf_text(pdf_path):
+        return """
+        Member ID / Name ABC123 / HEMA M
+        UAN 123456789012
+        Establishment ID / Name EST123 / TRICORE SOLUTIONS PRIVATE LIMITED
+        """
+
+    def fake_extract_pdf_tables(pdf_path):
+        return [
+            [
+                "April",
+                "15,000.00",
+                "1,800.00",
+                "550.00",
+                "1,250.00",
+                "0",
+                "0",
+                "",
+            ]
+        ]
+
+    monkeypatch.setattr(form_app, "extract_pdf_text", fake_extract_pdf_text)
+    monkeypatch.setattr(form_app, "extract_pdf_tables", fake_extract_pdf_tables)
+
+    response = client.post(
+        "/convert",
+        data={
+            "pdf": (
+                io.BytesIO(b"%PDF-1.4 fake pdf content"),
+                "sample.pdf",
+            )
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 200
+
+    data = response.get_json()
+
+    assert data["message"] == "Form 3A Excel created successfully"
+    assert "download_url" in data
+    assert len(data["rows"]) > 0
+
+    excel_filename = Path(data["download_url"]).name
+    excel_path = output_dir / excel_filename
+
+    assert excel_path.exists()
+
+
+def test_convert_route_rejects_non_pdf(flask_client):
+    client, _ = flask_client
+
+    response = client.post(
+        "/convert",
+        data={
+            "pdf": (
+                io.BytesIO(b"not a pdf"),
+                "sample.txt",
+            )
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 400
+
+    data = response.get_json()
+    assert data["error"] == "Only PDF files are allowed"
+
+
+def test_convert_route_no_monthly_rows(flask_client, monkeypatch):
+    client, _ = flask_client
+
+    monkeypatch.setattr(form_app, "extract_pdf_text", lambda pdf_path: "No monthly table here")
+    monkeypatch.setattr(form_app, "extract_pdf_tables", lambda pdf_path: [])
+
+    response = client.post(
+        "/convert",
+        data={
+            "pdf": (
+                io.BytesIO(b"%PDF-1.4 fake pdf content"),
+                "sample.pdf",
+            )
+        },
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 400
+
+    data = response.get_json()
+    assert "Monthly contribution table was not detected" in data["error"]
